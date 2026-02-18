@@ -139,7 +139,7 @@ def clear_history():
     st.toast("Storico cancellato.", icon="🗑️")
 
 # --- MAIN PAGE ---
-st.title("🔬 Muffin Lab: Storico & Analisi")
+st.title("🔬 Muffin Lab: Analisi immagine")
 
 # Selezione Input
 input_method = st.radio("Sorgente:", ("📸 Scatta Foto", "📂 Carica da Galleria"), horizontal=True, label_visibility="collapsed")
