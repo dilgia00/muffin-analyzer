@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 from pillow_heif import register_heif_opener
-from skimage import feature, measure, morphology, filters, color
+from skimage import measure, morphology, color
 from scipy.stats import weibull_min, lognorm, gamma
 from scipy import ndimage
 import io
@@ -25,16 +25,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- FUNZIONI DI ELABORAZIONE ---
-
 def load_image(image_file):
     try:
-        # Mantiene la massima risoluzione possibile letta da PIL
         image = Image.open(image_file)
         try:
             from PIL import ImageOps
             image = ImageOps.exif_transpose(image)
         except: pass
-        
         img_np = np.asarray(image)
         if len(img_np.shape) == 2: return cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
         elif img_np.shape[2] == 4: return cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR)
@@ -43,19 +40,18 @@ def load_image(image_file):
         st.error(f"Errore file: {e}")
         return None
 
-def apply_filter(gray_img, filter_type):
+def apply_filter(gray_img, filter_type, params):
     if filter_type == "CLAHE (Contrasto)":
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        clahe = cv2.createCLAHE(clipLimit=params['clip_limit'], tileGridSize=params['tile_grid_size'])
         return clahe.apply(gray_img)
     elif filter_type == "Gaussiano (Smussamento)":
-        return cv2.GaussianBlur(gray_img, (5, 5), 0)
+        return cv2.GaussianBlur(gray_img, params['kernel_size'], params['sigma_x'])
     elif filter_type == "Mediano (Rumore Sale/Pepe)":
-        return cv2.medianBlur(gray_img, 5)
+        return cv2.medianBlur(gray_img, params['kernel_size'])
     elif filter_type == "Gabor (Filtro Direzionale)":
-        # Creazione di un filtro di Gabor base
-        g_kernel = cv2.getGaborKernel((15, 15), 3.0, np.pi/4, 10.0, 0.5, 0, ktype=cv2.CV_32F)
-        filtered = cv2.filter2D(gray_img, cv2.CV_8UC3, g_kernel)
-        return filtered
+        g_kernel = cv2.getGaborKernel(params['ksize'], params['sigma'], params['theta'], 
+                                      params['lambd'], params['gamma'], params['psi'], ktype=cv2.CV_32F)
+        return cv2.filter2D(gray_img, cv2.CV_8UC3, g_kernel)
     return gray_img
 
 def fractal_dimension(Z):
@@ -103,27 +99,6 @@ def smart_crop(img, lower_hsv, upper_hsv):
 
     return img[y1:y2, x1:x2], mask_main[y1:y2, x1:x2], base_w_px
 
-# --- SIDEBAR ---
-st.sidebar.header("🎛️ Configurazione")
-DIAMETRO_BASE_MM = st.sidebar.number_input("Larghezza Base Reale (mm)", value=50.0, step=0.5)
-
-st.sidebar.markdown("### 🖼️ Elaborazione Immagine")
-SELECTED_FILTER = st.sidebar.selectbox("Filtro Pre-Elaborazione", 
-                                       ["CLAHE (Contrasto)", "Gaussiano (Smussamento)", "Mediano (Rumore Sale/Pepe)", "Gabor (Filtro Direzionale)"])
-
-st.sidebar.markdown("### 📊 Modello Statistico Pori")
-STAT_MODEL = st.sidebar.selectbox("Distribuzione", ["Weibull", "Lognormale", "Gamma"])
-
-with st.sidebar.expander("🛠️ Parametri Avanzati (HSV & Maschere)", expanded=False):
-    c1, c2 = st.columns(2)
-    h_min, h_max = c1.slider("H Min", 0, 180, 0), c2.slider("H Max", 0, 180, 40)
-    s_min, v_min = c1.slider("S Min", 0, 255, 30), c1.slider("V Min", 0, 255, 60)
-    MIN_PORE_AREA = st.number_input("Area Min Poro (px)", 20)
-    MASK_EROSION = st.number_input("Erosione (px)", 15)
-
-LOWER_HSV, UPPER_HSV = np.array([h_min, s_min, v_min]), np.array([h_max, 255, 255])
-
-# --- GESTIONE STORICO ---
 def add_to_history(batch_results):
     if batch_results:
         existing_files = [item['File'] for item in st.session_state['history_data']]
@@ -132,22 +107,88 @@ def add_to_history(batch_results):
             st.session_state['history_data'].extend(new_items)
             st.toast(f"✅ {len(new_items)} muffin aggiunti allo storico!", icon="💾")
 
+# --- SIDEBAR: CONTROLLI DINAMICI ---
+st.sidebar.header("🎛️ Configurazione")
+DIAMETRO_BASE_MM = st.sidebar.number_input("Larghezza Base Reale (mm)", value=50.0, step=0.5)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🖼️ Filtro Pre-Elaborazione")
+SELECTED_FILTER = st.sidebar.selectbox("Scegli il Filtro", 
+    ["CLAHE (Contrasto)", "Gaussiano (Smussamento)", "Mediano (Rumore Sale/Pepe)", "Gabor (Filtro Direzionale)"])
+
+filter_params = {}
+with st.sidebar.expander(f"⚙️ Parametri: {SELECTED_FILTER}", expanded=True):
+    if SELECTED_FILTER == "CLAHE (Contrasto)":
+        filter_params['clip_limit'] = st.slider("Clip Limit (Forza del contrasto)", 1.0, 10.0, 3.0, 0.5)
+        t_size = st.slider("Dimensione Griglia (Tile Grid)", 2, 16, 8, 2)
+        filter_params['tile_grid_size'] = (t_size, t_size)
+    elif SELECTED_FILTER == "Gaussiano (Smussamento)":
+        k_size = st.slider("Kernel Size (Dimensione sfocatura - dispari)", 3, 31, 5, 2)
+        filter_params['kernel_size'] = (k_size, k_size)
+        filter_params['sigma_x'] = st.slider("Sigma X", 0.0, 10.0, 0.0, 0.5)
+    elif SELECTED_FILTER == "Mediano (Rumore Sale/Pepe)":
+        k_size = st.slider("Kernel Size (dispari)", 3, 31, 5, 2)
+        filter_params['kernel_size'] = k_size
+    elif SELECTED_FILTER == "Gabor (Filtro Direzionale)":
+        k_size = st.slider("Kernel Size", 5, 51, 15, 2)
+        filter_params['ksize'] = (k_size, k_size)
+        filter_params['sigma'] = st.slider("Sigma (Deviazione Standard)", 0.1, 10.0, 3.0, 0.1)
+        theta_deg = st.slider("Theta (Gradi direzionali)", 0, 180, 45, 5)
+        filter_params['theta'] = theta_deg * np.pi / 180.0
+        filter_params['lambd'] = st.slider("Lambda (Lunghezza d'onda)", 1.0, 30.0, 10.0, 0.5)
+        filter_params['gamma'] = st.slider("Gamma (Rapporto spaziale)", 0.1, 2.0, 0.5, 0.1)
+        filter_params['psi'] = st.slider("Psi (Fase)", 0.0, 3.14, 0.0, 0.1)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📊 Modello Statistico")
+STAT_MODEL = st.sidebar.selectbox("Distribuzione dei Pori", ["Weibull", "Lognormale", "Gamma"])
+
+model_params = {}
+with st.sidebar.expander(f"📈 Impostazioni: {STAT_MODEL}", expanded=True):
+    st.write("Le curve di fitting calcolano i parametri in base alle aree rilevate. Puoi però vincolare alcuni parametri.")
+    fix_loc = st.checkbox("Fissa Posizione (Loc = 0)", value=True, help="Forza la partenza della curva da 0. Fisicamente corretto poiché non esistono pori con area negativa.")
+    if fix_loc:
+        model_params['floc'] = 0
+
+st.sidebar.markdown("---")
+with st.sidebar.expander("🛠️ Parametri Avanzati (Maschere & HSV)", expanded=False):
+    c1, c2 = st.columns(2)
+    h_min, h_max = c1.slider("H Min", 0, 180, 0), c2.slider("H Max", 0, 180, 40)
+    s_min, v_min = c1.slider("S Min", 0, 255, 30), c1.slider("V Min", 0, 255, 60)
+    MIN_PORE_AREA = st.number_input("Area Min Poro (px)", 20)
+    MASK_EROSION = st.number_input("Erosione (px)", 15)
+
+LOWER_HSV, UPPER_HSV = np.array([h_min, s_min, v_min]), np.array([h_max, 255, 255])
+
 # --- MAIN PAGE ---
 st.title("🔬 Muffin Lab: Analisi Avanzata")
 
-# UI Informativa Modelli
-with st.expander("📘 Significato dei Parametri Statistici & Equazioni"):
+with st.expander("📘 Significato dei Modelli Statistici & Equazioni"):
     st.markdown("""
-    **Modello di Weibull (Minimo)**
-    Ottimo per modellare la distribuzione di particelle o pori che tendono ad avere un limite inferiore o dimensioni asimmetriche.
-    * **Forma (Shape / α o k):** Definisce la pendenza della curva. Se < 1 indica pori prevalentemente piccoli; se > 1 la distribuzione ha un picco.
-    * **Scala (Scale / β o λ):** Rappresenta la "diffusione" o dimensione caratteristica (il 63.2% dei pori è più piccolo di questo valore).
-    * **Posizione (Loc / γ):** Il valore minimo teorico dell'area di un poro nel campione.
+    I modelli estraggono sempre 3 metriche principali dalla distribuzione delle aree dei pori:
+    * **Forma (Shape):** Determina il profilo della curva (simmetria, picchi, asimmetria).
+    * **Scala (Scale):** La "diffusione" dei dati o dimensione di riferimento del poro tipico.
+    * **Posizione (Loc):** Il punto d'inizio della curva sull'asse X (minimo teorico dell'area).
+    
+    ---
+    **1. Modello di Weibull (Minimo)**
+    Ottimo per descrivere particelle o pori. Se Shape > 1, i pori tendono verso una dimensione specifica (alveolatura regolare).
     """)
-    st.latex(r"f(x; \alpha, \beta, \gamma) = \frac{\alpha}{\beta} \left( \frac{x - \gamma}{\beta} \right)^{\alpha - 1} e^{-\left( \frac{x - \gamma}{\beta} \right)^\alpha}")
+    st.latex(r"f(x) = \frac{\alpha}{\beta} \left( \frac{x - \gamma}{\beta} \right)^{\alpha - 1} e^{-\left( \frac{x - \gamma}{\beta} \right)^\alpha}")
+    
+    st.markdown("""
+    **2. Modello Lognormale**
+    Tipico per processi fisici di accrescimento (es. bolle di gas che si espandono nell'impasto lievitato). Assesta una lunga "coda" verso le dimensioni più ampie.
+    """)
+    st.latex(r"f(x) = \frac{1}{(x-\gamma) s \sqrt{2\pi}} e^{-\frac{(\ln(x-\gamma) - \mu)^2}{2s^2}} \quad \text{(con Scale} = e^\mu \text{)}")
 
-# Selezione Input
-st.info("💡 **Tip per Fotografia:** Per usare il Flash o la risoluzione 48/50MP, scatta la foto con l'app nativa del tuo telefono e usa 'Carica da Galleria'.")
+    st.markdown("""
+    **3. Modello Gamma**
+    Alternativa flessibile alla Lognormale. Spesso usata per tempi di attesa o accorpamento di difetti in materiali compositi.
+    """)
+    st.latex(r"f(x) = \frac{(x-\gamma)^{a-1} e^{-(x-\gamma)/\beta}}{\beta^a \Gamma(a)}")
+
+st.info("💡 **Tip per Fotografia:** Per usare il Flash o la massima risoluzione del sensore, scatta prima la foto con l'app nativa e usa 'Carica da Galleria'.")
 input_method = st.radio("Sorgente:", ("📂 Carica da Galleria", "📸 Scatta Foto Base"), horizontal=True, label_visibility="collapsed")
 image_files = []
 
@@ -158,7 +199,6 @@ else:
     uploaded = st.file_uploader("Carica Immagini", type=['png', 'jpg', 'jpeg', 'heic'], accept_multiple_files=True)
     if uploaded: image_files = uploaded
 
-# --- TABS PRINCIPALI ---
 tab_analysis, tab_history = st.tabs(["👁️ Analisi Corrente", "🗂️ Storico Sessione (Report)"])
 current_batch_results = []
 
@@ -169,21 +209,19 @@ with tab_analysis:
             img = load_image(img_file)
             if img is None: continue
             
-            # Non facciamo più il resize drastico se l'utente vuole alta definizione
-            # Riduciamo solo se l'immagine è titanica per evitare crash di RAM (> 3000px)
             max_dim = max(img.shape[:2])
             if max_dim > 3000:
-                scale = 3000 / max_dim
-                img = cv2.resize(img, None, fx=scale, fy=scale)
+                scale_img = 3000 / max_dim
+                img = cv2.resize(img, None, fx=scale_img, fy=scale_img)
             
             crop_img, crop_mask, base_w_px = smart_crop(img, LOWER_HSV, UPPER_HSV)
             
             if crop_img is not None:
                 ppm = base_w_px / DIAMETRO_BASE_MM
                 
-                # Applica filtro selezionato
                 gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
-                gray_filtered = apply_filter(gray, SELECTED_FILTER)
+                # Applica il filtro con i parametri scelti dall'utente
+                gray_filtered = apply_filter(gray, SELECTED_FILTER, filter_params)
                 
                 kernel_erode = np.ones((int(MASK_EROSION), int(MASK_EROSION)), np.uint8)
                 mask_safe = cv2.erode(crop_mask, kernel_erode, iterations=1) > 0
@@ -202,17 +240,18 @@ with tab_analysis:
                 
                 areas_mm = [p.area / (ppm**2) for p in props if p.area >= MIN_PORE_AREA]
                 
-                # Fitting Modelli Statistici
                 shape, loc, scale_param = 0, 0, 0
                 if len(areas_mm) > 20:
                     try:
+                        # Fitta il modello applicando i vincoli dinamici (es. floc=0)
                         if STAT_MODEL == "Weibull":
-                            shape, loc, scale_param = weibull_min.fit(areas_mm)
+                            shape, loc, scale_param = weibull_min.fit(areas_mm, **model_params)
                         elif STAT_MODEL == "Lognormale":
-                            shape, loc, scale_param = lognorm.fit(areas_mm)
+                            shape, loc, scale_param = lognorm.fit(areas_mm, **model_params)
                         elif STAT_MODEL == "Gamma":
-                            shape, loc, scale_param = gamma.fit(areas_mm)
-                    except: pass
+                            shape, loc, scale_param = gamma.fit(areas_mm, **model_params)
+                    except Exception as e:
+                        st.warning(f"Errore fitting {STAT_MODEL}: {e}")
                 
                 with st.expander(f"📄 Risultati: {fname}", expanded=True):
                     c1, c2, c3 = st.columns(3)
@@ -220,20 +259,21 @@ with tab_analysis:
                     c2.metric("Spessore Pareti", f"{wall_th:.2f} mm")
                     c3.metric("FD", f"{fd:.3f}")
                     
-                    st.markdown(f"**Parametri {STAT_MODEL}:**")
+                    st.markdown(f"**Parametri Modello {STAT_MODEL}:**")
                     cs1, cs2, cs3 = st.columns(3)
-                    cs1.metric("Forma (Shape)", f"{shape:.3f}")
-                    cs2.metric("Scala (Scale)", f"{scale_param:.3f}")
-                    cs3.metric("Posizione (Loc)", f"{loc:.3f}")
+                    cs1.metric("Forma (Shape / α o s)", f"{shape:.3f}")
+                    cs2.metric("Scala (Scale / β o e^μ)", f"{scale_param:.3f}")
+                    cs3.metric("Posizione (Loc / γ)", f"{loc:.3f}")
                     
                     col_i1, col_i2 = st.columns(2)
-                    col_i1.image(crop_img, channels="BGR", caption="Originale HD")
+                    col_i1.image(crop_img, channels="BGR", caption="Originale HD (Croppata)")
                     overlay = color.label2rgb(measure.label(pores), image=gray, bg_label=0, colors=['red'], alpha=0.3)
                     col_i2.image(overlay, caption=f"Pori ({SELECTED_FILTER})")
                 
                 current_batch_results.append({
                     "File": fname,
                     "Filtro Usato": SELECTED_FILTER,
+                    "Param. Filtro": str(filter_params),
                     "Modello Stat.": STAT_MODEL,
                     "Porosità (%)": round(porosity, 2),
                     "Spessore (mm)": round(wall_th, 2),
@@ -259,7 +299,8 @@ with tab_history:
             df_history.to_excel(writer, index=False)
             
         c_down, c_clear = st.columns([1, 1])
-        c_down.download_button("📥 Scarica Excel", data=buffer.getvalue(), file_name="Dati_Muffin.xlsx", mime="application/vnd.ms-excel")
+        c_down.download_button("📥 Scarica Excel", data=buffer.getvalue(), file_name="Dati_Muffin_Pro.xlsx", mime="application/vnd.ms-excel")
         if c_clear.button("🗑️ Cancella Storico"):
             st.session_state['history_data'] = []
             st.rerun()
+        
